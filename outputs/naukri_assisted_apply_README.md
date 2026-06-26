@@ -2,7 +2,7 @@
 
 I created `naukri_assisted_apply.user.js`, a Chrome userscript for Tampermonkey or Violentmonkey.
 
-It scans the visible Naukri results page, queues matching jobs, opens job pages one by one, and asks for your confirmation before clicking `Apply` for each job. After each job it automatically moves to the next queued job. It skips jobs that are already applied, show screening popups/questions, or only offer `Apply on company site`. It stops for OTP/CAPTCHA or unclear outcomes.
+It scans the visible Naukri results page, queues matching jobs, opens job pages one by one, and pauses with simple `Apply` / `Skip` buttons when a normal Naukri quick-apply button is ready. After each completed or skipped job it automatically moves to the next queued job. It skips jobs that are already applied, show screening popups/questions, or only offer `Apply on company site`. It stops for OTP/CAPTCHA or unclear outcomes.
 
 ## Install
 
@@ -17,7 +17,7 @@ It scans the visible Naukri results page, queues matching jobs, opens job pages 
 1. Open any Naukri page.
 2. Use the floating `Naukri Assist` panel.
 3. Click `Start`.
-4. Approve or decline each application confirmation.
+4. When it pauses on a normal quick-apply job, click `Apply` or `Skip`.
 
 Open `Advanced` only when you want to change the search URL, keywords, max jobs, or export the CSV log.
 

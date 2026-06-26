@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Naukri Assisted Apply Queue
 // @namespace    codex.local
-// @version      0.2.0
-// @description  Queue Naukri jobs from search results and assist with user-confirmed applications.
+// @version      0.3.0
+// @description  Queue Naukri jobs from search results and assist with one-click reviewed applications.
 // @match        https://www.naukri.com/*
 // @include      https://*.naukri.com/*
 // @run-at       document-idle
@@ -298,9 +298,23 @@
     });
   }
 
-  function skipCurrent() {
+  function resumeQueue(delayMs) {
+    updateState((state) => {
+      state.running = true;
+      state.paused = false;
+    });
+    if (readState().options.autoNext) {
+      setTimeout(goToNextJob, delayMs);
+    }
+  }
+
+  function skipCurrent(resumeAfterSkip) {
     markCurrent("skipped", "Skipped by user.");
     log("Skipped current job.");
+    if (resumeAfterSkip) {
+      resumeQueue(700);
+      return;
+    }
     if (readState().running) {
       setTimeout(goToNextJob, 700);
     }
@@ -513,25 +527,63 @@
     }
 
     const title = getDetailTitle(job);
-    const company = job.company ? ` at ${job.company}` : "";
-    const message = [
-      `Apply to "${title}"${company}?`,
-      "",
-      "This will send your Naukri profile/resume to the employer.",
-      "The helper will skip jobs with screening questions and stop for verification or external redirects."
-    ].join("\n");
+    markCurrent("ready", "Ready for your Apply click.");
+    updateState((next) => {
+      next.running = false;
+      next.paused = true;
+    });
+    log(`Ready to apply: ${title}`);
+  }
 
-    if (!window.confirm(message)) {
-      markCurrent("skipped", "User declined confirmation.");
-      log(`Skipped: ${title}`);
-      if (readState().running) setTimeout(goToNextJob, 900);
+  async function applyCurrentJobFromPanel() {
+    const state = readState();
+    const job = currentJobForPage() || state.queue.find((item) => canonicalUrl(item.url) === canonicalUrl(state.currentUrl));
+    if (!job) {
+      log("No queued job is active on this page.");
       return;
     }
 
+    const title = getDetailTitle(job);
+    if (detectAlreadyApplied()) {
+      markCurrent("skipped", "Already applied.");
+      log(`Skipped already-applied job: ${title}`);
+      resumeQueue(900);
+      return;
+    }
+
+    if (detectBlockingPopup()) {
+      markCurrent("skipped", "Popup detected before apply.");
+      log(`Skipped popup job: ${title}`);
+      resumeQueue(900);
+      return;
+    }
+
+    if (hasCompanySiteApply()) {
+      markCurrent("skipped", "Apply on company site.");
+      log(`Skipped company-site apply: ${title}`);
+      resumeQueue(900);
+      return;
+    }
+
+    const applyButton = await waitForApplyButton();
+    if (!applyButton) {
+      markCurrent("skipped", "No normal Naukri Apply button found.");
+      log(`Skipped no quick-apply button: ${title}`);
+      resumeQueue(900);
+      return;
+    }
+
+    updateState((next) => {
+      next.running = true;
+      next.paused = false;
+    });
     markCurrent("opening", "Applying.");
     applyButton.click();
     log(`Clicked Apply for: ${title}`);
+    await handleApplyOutcome(title);
+  }
 
+  async function handleApplyOutcome(title) {
     const outcome = await waitForOutcome();
     if (outcome === "applied") {
       markCurrent("applied", "Application appears submitted.");
@@ -543,7 +595,7 @@
     if (outcome === "popup") {
       markCurrent("skipped", "Popup or screening question detected.");
       log(`Skipped popup/screening: ${title}`);
-      if (readState().options.autoNext) setTimeout(goToNextJob, 1200);
+      resumeQueue(1200);
       return;
     }
 
@@ -713,6 +765,14 @@
           color: #18202a;
           font-weight: 700;
         }
+        #codex-naukri-assist .cna-actions[hidden] {
+          display: none;
+        }
+        #codex-naukri-assist .cna-actions {
+          display: flex;
+          gap: 6px;
+          margin-top: 9px;
+        }
         #codex-naukri-assist details {
           margin-top: 9px;
           border-top: 1px solid #e4e8ee;
@@ -746,6 +806,10 @@
         <div class="cna-status" id="cnaStatus"></div>
         <div class="cna-counts" id="cnaCounts"></div>
         <div class="cna-current" id="cnaCurrent"></div>
+        <div class="cna-actions" id="cnaApplyActions" hidden>
+          <button type="button" id="cnaApplyCurrent" class="primary">Apply</button>
+          <button type="button" id="cnaSkipCurrent" class="warn">Skip</button>
+        </div>
         <div class="cna-row">
           <button type="button" id="cnaRun" class="primary">Start</button>
           <button type="button" id="cnaClear" class="warn">Reset</button>
@@ -784,6 +848,8 @@
     });
     panel.querySelector("#cnaExport").addEventListener("click", exportCsv);
     panel.querySelector("#cnaClear").addEventListener("click", clearQueue);
+    panel.querySelector("#cnaApplyCurrent").addEventListener("click", applyCurrentJobFromPanel);
+    panel.querySelector("#cnaSkipCurrent").addEventListener("click", () => skipCurrent(true));
     panel.querySelector("#cnaSearchUrl").addEventListener("change", persistOptionsFromPanel);
     panel.querySelector("#cnaInclude").addEventListener("change", persistOptionsFromPanel);
     panel.querySelector("#cnaExclude").addEventListener("change", persistOptionsFromPanel);
@@ -822,12 +888,18 @@
     const pageType = isSearchResultsPage() ? "search page" : isJobDetailPage() ? "job detail" : "Naukri page";
     panel.querySelector("#cnaStatus").textContent = `${active} on ${pageType}`;
     panel.querySelector("#cnaCounts").textContent =
-      `Queue ${counts.total || 0} | Pending ${(counts.queued || 0) + (counts.opening || 0)} | Applied ${counts.applied || 0} | Skipped ${counts.skipped || 0}`;
+      `Queue ${counts.total || 0} | Pending ${(counts.queued || 0) + (counts.opening || 0) + (counts.ready || 0)} | Applied ${counts.applied || 0} | Skipped ${counts.skipped || 0}`;
 
     const currentJob = state.queue.find((job) => canonicalUrl(job.url) === canonicalUrl(state.currentUrl));
+    const waitingForApply =
+      currentJob &&
+      currentJob.status === "ready" &&
+      isJobDetailPage() &&
+      canonicalUrl(location.href) === canonicalUrl(currentJob.url);
     panel.querySelector("#cnaCurrent").textContent = currentJob
-      ? `${currentJob.status || "queued"}: ${currentJob.title || "Naukri job"}${currentJob.company ? ` - ${currentJob.company}` : ""}`
+      ? `${waitingForApply ? "Ready" : currentJob.status || "queued"}: ${currentJob.title || "Naukri job"}${currentJob.company ? ` - ${currentJob.company}` : ""}`
       : "Start on a Naukri results page.";
+    panel.querySelector("#cnaApplyActions").hidden = !waitingForApply;
     panel.querySelector("#cnaRun").textContent = state.running ? "Pause" : "Start";
 
     const queueBox = panel.querySelector("#cnaQueue");
