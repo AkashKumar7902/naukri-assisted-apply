@@ -2,7 +2,7 @@
 
 I created `naukri_assisted_apply.user.js`, a Chrome userscript for Tampermonkey or Violentmonkey.
 
-It does not blindly spam applications. It scans the visible Naukri results page, queues matching jobs, opens job pages one by one, and asks for your confirmation before clicking `Apply` for each job. It skips jobs that show screening questions, and stops when Naukri shows OTP/CAPTCHA, redirects outside Naukri, or when the outcome cannot be confirmed.
+It scans the visible Naukri results page, queues matching jobs, opens job pages one by one, and asks for your confirmation before clicking `Apply` for each job. After each job it automatically moves to the next queued job. It skips jobs that are already applied, show screening popups/questions, or only offer `Apply on company site`. It stops for OTP/CAPTCHA or unclear outcomes.
 
 ## Install
 
@@ -16,11 +16,10 @@ It does not blindly spam applications. It scans the visible Naukri results page,
 
 1. Open any Naukri page.
 2. Use the floating `Naukri Assist` panel.
-3. Paste or edit the `Search URL`. The default is:
-   `https://www.naukri.com/software-developer-jobs?k=software%20developer&nignbevent_src=jobsearchDeskGNB&experience=1&functionAreaIdGid=5&ctcFilter=15to25&glbl_qcrc=1026&glbl_qcrc=1027&glbl_qcrc=1028&jobAge=1`
-4. Adjust include/exclude keywords if needed.
-5. Click `Open search` to navigate to that search URL, or click `Start queue` to open the URL, scan it, and begin the queue.
-6. Approve or decline each application confirmation.
+3. Click `Start`.
+4. Approve or decline each application confirmation.
+
+Open `Advanced` only when you want to change the search URL, keywords, max jobs, or export the CSV log.
 
 ## Notes
 
@@ -28,6 +27,6 @@ It does not blindly spam applications. It scans the visible Naukri results page,
 - Use Naukri filters first for location, salary, freshness, company type, and work mode.
 - You can replace the `Search URL` with any Naukri results URL.
 - It will not solve CAPTCHAs, OTPs, or answer recruiter questions automatically.
-- Jobs with screening questions are marked `skipped` and the queue moves on.
+- Jobs with screening questions, popups, company-site apply, or already-applied status are marked `skipped` and the queue moves on.
 - `Export CSV` downloads the current queue and status log.
-- `Clear` removes the local queue from your browser storage.
+- `Reset` removes the local queue from your browser storage.

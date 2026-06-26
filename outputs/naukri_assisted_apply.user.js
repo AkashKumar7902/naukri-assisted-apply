@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naukri Assisted Apply Queue
 // @namespace    codex.local
-// @version      0.1.3
+// @version      0.2.0
 // @description  Queue Naukri jobs from search results and assist with user-confirmed applications.
 // @match        https://www.naukri.com/*
 // @include      https://*.naukri.com/*
@@ -130,6 +130,10 @@
     return /\/job-listings-/i.test(location.href) || Boolean(document.querySelector("#apply-button, .apply-button"));
   }
 
+  function isApplyConfirmationPage() {
+    return /\/myapply\/saveApply/i.test(location.pathname) || /apply confirmation/i.test(document.title);
+  }
+
   function isConfiguredSearchPage() {
     const searchUrl = normalizeNaukriUrl(readState().options.searchUrl);
     return Boolean(searchUrl && canonicalUrl(location.href) === canonicalUrl(searchUrl));
@@ -248,7 +252,7 @@
   }
 
   function clearQueue() {
-    if (!window.confirm("Clear the Naukri assisted-apply queue and local log?")) return;
+    if (!window.confirm("Reset the Naukri assisted-apply queue and local log?")) return;
     saveState(defaultState());
     renderPanel();
   }
@@ -302,13 +306,22 @@
     }
   }
 
+  function hasCompanySiteApply() {
+    return Array.from(document.querySelectorAll("button, a, [role='button']")).some((element) => {
+      const text = normalizeText(element.innerText || element.textContent || element.getAttribute("aria-label"));
+      const marker = `${element.id || ""} ${element.className || ""} ${text}`.toLowerCase();
+      return isVisible(element) && /apply on company site|company-site-button/.test(marker);
+    });
+  }
+
   function findApplyButton() {
     const controls = Array.from(document.querySelectorAll("button, a, [role='button']"));
     const candidates = controls.filter((element) => {
       const text = normalizeText(element.innerText || element.textContent || element.getAttribute("aria-label"));
       const marker = `${element.id || ""} ${element.className || ""} ${text}`.toLowerCase();
       if (/applied/i.test(text)) return false;
-      if (!/(\bapply\b|apply-button)/i.test(marker)) return false;
+      if (/apply on company site|company-site-button/.test(marker)) return false;
+      if (text.toLowerCase() !== "apply" && !/\bapply-button\b/.test(marker)) return false;
       if (element.disabled || element.getAttribute("aria-disabled") === "true") return false;
       return isVisible(element);
     });
@@ -317,7 +330,7 @@
     return candidates[0] || null;
   }
 
-  function detectApplied() {
+  function detectAlreadyApplied() {
     const controls = Array.from(document.querySelectorAll("button, a, [role='button']"));
     const hasAppliedControl = controls.some((element) => {
       const text = normalizeText(element.innerText || element.textContent || element.getAttribute("aria-label"));
@@ -325,8 +338,14 @@
     });
 
     const pageText = normalizeText(document.body?.innerText || "").toLowerCase();
+    return hasAppliedControl || pageText.includes("already applied") || pageText.includes("you have already applied");
+  }
+
+  function detectApplied() {
+    const pageText = normalizeText(document.body?.innerText || "").toLowerCase();
     return (
-      hasAppliedControl ||
+      detectAlreadyApplied() ||
+      pageText.includes("applied to \"") ||
       pageText.includes("you have successfully applied") ||
       pageText.includes("application submitted") ||
       pageText.includes("application sent")
@@ -336,6 +355,25 @@
   function detectCaptchaOrVerification() {
     const pageText = normalizeText(document.body?.innerText || "").toLowerCase();
     return /captcha|verify you are human|are you a robot|otp|one time password/.test(pageText);
+  }
+
+  function detectBlockingPopup() {
+    const popupSelectors = [
+      "[role='dialog']",
+      "[aria-modal='true']",
+      ".modal",
+      "[class*='modal']",
+      "[class*='chatbot_Drawer']",
+      "[class*='chatbot_Overlay']",
+      "[class*='Drawer']"
+    ].join(",");
+
+    return Array.from(document.querySelectorAll(popupSelectors)).some((element) => {
+      if (element.closest("#codex-naukri-assist")) return false;
+      if (!isVisible(element)) return false;
+      const marker = `${element.id || ""} ${element.className || ""} ${normalizeText(element.innerText || element.textContent)}`.toLowerCase();
+      return /chatbot|modal|dialog|drawer|question|answer|required|yes|no|save|continue|submit/.test(marker);
+    });
   }
 
   function detectManualQuestionnaire() {
@@ -356,7 +394,7 @@
     const pageText = normalizeText(document.body?.innerText || "").toLowerCase();
     const hasQuestionText = /question|answer|required|screening|additional detail|recruiter/.test(pageText);
     const hasSubmitLikeButton = visibleActionButtons.some((text) => /^(submit|next|continue|save)$/i.test(text));
-    return visibleInputs.length > 0 && (hasQuestionText || hasSubmitLikeButton);
+    return detectBlockingPopup() || (visibleInputs.length > 0 && (hasQuestionText || hasSubmitLikeButton));
   }
 
   function waitForCondition(check, timeoutMs) {
@@ -381,7 +419,7 @@
       if (!/naukri\.com$/i.test(location.hostname)) return "external";
       if (detectCaptchaOrVerification()) return "verification";
       if (detectApplied()) return "applied";
-      if (detectManualQuestionnaire()) return "manual";
+      if (detectManualQuestionnaire()) return "popup";
       return null;
     }, 10000);
   }
@@ -445,21 +483,32 @@
       return;
     }
 
-    if (detectApplied()) {
-      markCurrent("applied", "Already applied.");
-      log(`Already applied: ${getDetailTitle(job)}`);
+    if (detectAlreadyApplied()) {
+      markCurrent("skipped", "Already applied.");
+      log(`Skipped already-applied job: ${getDetailTitle(job)}`);
+      if (state.options.autoNext) setTimeout(goToNextJob, 900);
+      return;
+    }
+
+    if (detectBlockingPopup()) {
+      markCurrent("skipped", "Popup detected before apply.");
+      log(`Skipped popup job: ${getDetailTitle(job)}`);
+      if (state.options.autoNext) setTimeout(goToNextJob, 900);
+      return;
+    }
+
+    if (hasCompanySiteApply()) {
+      markCurrent("skipped", "Apply on company site.");
+      log(`Skipped company-site apply: ${getDetailTitle(job)}`);
       if (state.options.autoNext) setTimeout(goToNextJob, 900);
       return;
     }
 
     const applyButton = await waitForApplyButton();
     if (!applyButton) {
-      markCurrent("manual", "No visible Apply button found.");
-      updateState((next) => {
-        next.running = false;
-        next.paused = true;
-      });
-      log("Stopped: no visible Apply button on this job.");
+      markCurrent("skipped", "No normal Naukri Apply button found.");
+      log(`Skipped no quick-apply button: ${getDetailTitle(job)}`);
+      if (state.options.autoNext) setTimeout(goToNextJob, 900);
       return;
     }
 
@@ -479,6 +528,7 @@
       return;
     }
 
+    markCurrent("opening", "Applying.");
     applyButton.click();
     log(`Clicked Apply for: ${title}`);
 
@@ -490,9 +540,9 @@
       return;
     }
 
-    if (outcome === "manual") {
-      markCurrent("skipped", "Screening question or extra inputs detected.");
-      log(`Skipped screening questions: ${title}`);
+    if (outcome === "popup") {
+      markCurrent("skipped", "Popup or screening question detected.");
+      log(`Skipped popup/screening: ${title}`);
       if (readState().options.autoNext) setTimeout(goToNextJob, 1200);
       return;
     }
@@ -523,6 +573,18 @@
       next.paused = true;
     });
     log("Stopped: could not confirm the application outcome.");
+  }
+
+  function runApplyConfirmationFlow() {
+    const state = readState();
+    if (!state.running || state.paused) return;
+
+    if (detectApplied() || isApplyConfirmationPage()) {
+      markCurrent("applied", "Application appears submitted.");
+      const current = state.queue.find((job) => canonicalUrl(job.url) === canonicalUrl(state.currentUrl));
+      log(`Applied: ${current?.title || normalizeText(document.title) || "job"}`);
+      if (state.options.autoNext) setTimeout(goToNextJob, 1000);
+    }
   }
 
   function exportCsv() {
@@ -562,7 +624,7 @@
           right: 16px;
           bottom: 16px;
           z-index: 2147483647;
-          width: 340px;
+          width: 320px;
           max-width: calc(100vw - 32px);
           color: #18202a;
           background: #ffffff;
@@ -628,6 +690,10 @@
           font: inherit;
           font-weight: 700;
         }
+        #codex-naukri-assist button.primary,
+        #codex-naukri-assist button.warn {
+          flex: 1 1 auto;
+        }
         #codex-naukri-assist button.primary {
           border-color: #2457d6;
           color: #ffffff;
@@ -641,6 +707,21 @@
         #codex-naukri-assist .cna-counts {
           margin-top: 7px;
           color: #465465;
+        }
+        #codex-naukri-assist .cna-current {
+          margin-top: 8px;
+          color: #18202a;
+          font-weight: 700;
+        }
+        #codex-naukri-assist details {
+          margin-top: 9px;
+          border-top: 1px solid #e4e8ee;
+          padding-top: 8px;
+        }
+        #codex-naukri-assist summary {
+          cursor: pointer;
+          color: #2457d6;
+          font-weight: 700;
         }
         #codex-naukri-assist .cna-log,
         #codex-naukri-assist .cna-queue {
@@ -664,25 +745,27 @@
       <div class="cna-body">
         <div class="cna-status" id="cnaStatus"></div>
         <div class="cna-counts" id="cnaCounts"></div>
-        <label for="cnaSearchUrl">Search URL</label>
-        <input id="cnaSearchUrl" type="url" />
-        <label for="cnaInclude">Include keywords</label>
-        <input id="cnaInclude" type="text" />
-        <label for="cnaExclude">Exclude keywords</label>
-        <input id="cnaExclude" type="text" />
-        <label for="cnaMaxJobs">Max new jobs per scan</label>
-        <input id="cnaMaxJobs" type="number" min="1" max="100" />
+        <div class="cna-current" id="cnaCurrent"></div>
         <div class="cna-row">
-          <button type="button" id="cnaOpenSearch">Open search</button>
-          <button type="button" id="cnaScan">Scan page</button>
-          <button type="button" id="cnaStart" class="primary">Start queue</button>
-          <button type="button" id="cnaPause">Pause</button>
-          <button type="button" id="cnaSkip">Skip current</button>
-          <button type="button" id="cnaExport">Export CSV</button>
-          <button type="button" id="cnaClear" class="warn">Clear</button>
+          <button type="button" id="cnaRun" class="primary">Start</button>
+          <button type="button" id="cnaClear" class="warn">Reset</button>
         </div>
         <div class="cna-queue" id="cnaQueue"></div>
         <div class="cna-log" id="cnaLog"></div>
+        <details>
+          <summary>Advanced</summary>
+          <label for="cnaSearchUrl">Search URL</label>
+          <input id="cnaSearchUrl" type="url" />
+          <label for="cnaInclude">Include keywords</label>
+          <input id="cnaInclude" type="text" />
+          <label for="cnaExclude">Exclude keywords</label>
+          <input id="cnaExclude" type="text" />
+          <label for="cnaMaxJobs">Max jobs</label>
+          <input id="cnaMaxJobs" type="number" min="1" max="100" />
+          <div class="cna-row">
+            <button type="button" id="cnaExport">Export CSV</button>
+          </div>
+        </details>
       </div>
     `;
 
@@ -691,24 +774,14 @@
       const minimized = panel.classList.toggle("cna-minimized");
       panel.querySelector("#cnaToggle").textContent = minimized ? "Show" : "Hide";
     });
-    panel.querySelector("#cnaScan").addEventListener("click", () => {
+    panel.querySelector("#cnaRun").addEventListener("click", () => {
       persistOptionsFromPanel();
-      scanJobsFromPage();
+      if (readState().running) {
+        pauseQueue();
+      } else {
+        startQueue();
+      }
     });
-    panel.querySelector("#cnaOpenSearch").addEventListener("click", () => {
-      persistOptionsFromPanel();
-      updateState((state) => {
-        state.running = false;
-        state.paused = false;
-      });
-      openConfiguredSearch();
-    });
-    panel.querySelector("#cnaStart").addEventListener("click", () => {
-      persistOptionsFromPanel();
-      startQueue();
-    });
-    panel.querySelector("#cnaPause").addEventListener("click", pauseQueue);
-    panel.querySelector("#cnaSkip").addEventListener("click", skipCurrent);
     panel.querySelector("#cnaExport").addEventListener("click", exportCsv);
     panel.querySelector("#cnaClear").addEventListener("click", clearQueue);
     panel.querySelector("#cnaSearchUrl").addEventListener("change", persistOptionsFromPanel);
@@ -747,16 +820,21 @@
 
     const active = state.running ? "Running" : state.paused ? "Paused" : "Ready";
     const pageType = isSearchResultsPage() ? "search page" : isJobDetailPage() ? "job detail" : "Naukri page";
-    panel.querySelector("#cnaStatus").textContent = `${active} on ${pageType}. Each apply action asks for your confirmation.`;
+    panel.querySelector("#cnaStatus").textContent = `${active} on ${pageType}`;
     panel.querySelector("#cnaCounts").textContent =
-      `Queue: ${counts.total || 0}, queued/opening: ${(counts.queued || 0) + (counts.opening || 0)}, ` +
-      `applied: ${counts.applied || 0}, manual: ${counts.manual || 0}, skipped: ${counts.skipped || 0}`;
+      `Queue ${counts.total || 0} | Pending ${(counts.queued || 0) + (counts.opening || 0)} | Applied ${counts.applied || 0} | Skipped ${counts.skipped || 0}`;
+
+    const currentJob = state.queue.find((job) => canonicalUrl(job.url) === canonicalUrl(state.currentUrl));
+    panel.querySelector("#cnaCurrent").textContent = currentJob
+      ? `${currentJob.status || "queued"}: ${currentJob.title || "Naukri job"}${currentJob.company ? ` - ${currentJob.company}` : ""}`
+      : "Start on a Naukri results page.";
+    panel.querySelector("#cnaRun").textContent = state.running ? "Pause" : "Start";
 
     const queueBox = panel.querySelector("#cnaQueue");
     queueBox.textContent = state.queue
       .slice(0, 6)
       .map((job, index) => `${index + 1}. [${job.status || "queued"}] ${job.title || "Naukri job"}${job.company ? ` - ${job.company}` : ""}`)
-      .join("\n") || "No queued jobs yet. Open a Naukri search page and click Scan page.";
+      .join("\n") || "No queued jobs yet.";
 
     panel.querySelector("#cnaLog").textContent = state.logs.join("\n") || "No activity yet.";
   }
@@ -766,6 +844,10 @@
 
     if (isJobDetailPage() && readState().running && !readState().paused) {
       setTimeout(runJobDetailFlow, 1200);
+    }
+
+    if (isApplyConfirmationPage() && readState().running && !readState().paused) {
+      setTimeout(runApplyConfirmationFlow, 1200);
     }
 
     if ((isSearchResultsPage() || isConfiguredSearchPage()) && readState().running && !readState().paused) {
