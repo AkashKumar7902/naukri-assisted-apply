@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naukri Assisted Apply Queue
 // @namespace    codex.local
-// @version      0.5.0
+// @version      0.6.0
 // @description  Queue Naukri jobs from search results and assist with one-click reviewed applications.
 // @match        https://www.naukri.com/*
 // @include      https://*.naukri.com/*
@@ -20,7 +20,7 @@
 
   const STORAGE_KEY = "codex.naukriAssistedApply.v1";
   const DEFAULT_SEARCH_URL = "https://www.naukri.com/software-developer-jobs?k=software%20developer&nignbevent_src=jobsearchDeskGNB&experience=1&functionAreaIdGid=5&ctcFilter=15to25&glbl_qcrc=1026&glbl_qcrc=1027&glbl_qcrc=1028&jobAge=1";
-  const SCHEMA_VERSION = 3;
+  const SCHEMA_VERSION = 4;
   const LEGACY_DEFAULT_INCLUDE = "software, developer, backend, cloud, java, python, spring, aws, gcp";
   const LEGACY_DEFAULT_EXCLUDE = "recruiter, sales, walk-in, system administrator, admin, customer support, bpo";
   const DEFAULT_OPTIONS = {
@@ -40,6 +40,7 @@
       running: false,
       paused: false,
       currentUrl: "",
+      manualWatchUrl: "",
       scannedSearchUrls: [],
       queue: [],
       options: Object.assign({}, DEFAULT_OPTIONS),
@@ -55,6 +56,7 @@
       state.options = Object.assign({}, DEFAULT_OPTIONS, state.options || {});
       state.queue = Array.isArray(state.queue) ? state.queue : [];
       state.logs = Array.isArray(state.logs) ? state.logs : [];
+      state.manualWatchUrl = state.manualWatchUrl || "";
       state.scannedSearchUrls = Array.isArray(state.scannedSearchUrls) ? state.scannedSearchUrls : [];
 
       if (savedSchemaVersion < SCHEMA_VERSION) {
@@ -393,7 +395,22 @@
   }
 
   function startQueue() {
-    let state = readState();
+    if (isSearchResultsPage()) {
+      const currentSearchUrl = normalizeNaukriUrl(location.href);
+      if (currentSearchUrl) {
+        updateState((next) => {
+          if (canonicalUrl(next.options.searchUrl) !== canonicalUrl(currentSearchUrl)) {
+            next.options.searchUrl = currentSearchUrl;
+            next.scannedSearchUrls = [];
+          } else {
+            next.options.searchUrl = currentSearchUrl;
+          }
+        });
+        log("Using the current search page URL.");
+      }
+    }
+
+    const state = readState();
     if (!state.queue.some((job) => !DONE_STATUSES.has(job.status)) && isSearchResultsPage()) {
       updateState((next) => {
         next.running = true;
@@ -501,6 +518,43 @@
         if (message) job.note = message;
       }
     });
+  }
+
+  function currentJobFromState(state) {
+    return state.queue.find((item) => canonicalUrl(item.url) === canonicalUrl(state.currentUrl)) || null;
+  }
+
+  function pauseForManualStep(title, message) {
+    markCurrent("manual", message);
+    updateState((state) => {
+      state.running = false;
+      state.paused = true;
+      state.manualWatchUrl = canonicalUrl(state.currentUrl || location.href);
+    });
+    log(`Paused for manual step: ${title}`);
+    startManualApplyMonitor();
+  }
+
+  function detectManualApplySuccess() {
+    const state = readState();
+    const job = currentJobFromState(state);
+    if (!job || job.status !== "manual") return false;
+    if (!detectApplied() && !isApplyConfirmationPage()) return false;
+
+    markCurrent("applied", "Application appears submitted after manual step.");
+    updateState((next) => {
+      next.manualWatchUrl = "";
+    });
+    log(`Applied after manual step: ${job.title || normalizeText(document.title) || "job"}`);
+    resumeQueue(1000);
+    return true;
+  }
+
+  function startManualApplyMonitor() {
+    if (window.__codexNaukriManualApplyMonitor) return;
+    window.__codexNaukriManualApplyMonitor = window.setInterval(() => {
+      detectManualApplySuccess();
+    }, 1500);
   }
 
   function resumeQueue(delayMs) {
@@ -717,9 +771,7 @@
     }
 
     if (detectBlockingPopup()) {
-      markCurrent("skipped", "Popup detected before apply.");
-      log(`Skipped popup job: ${getDetailTitle(job)}`);
-      if (state.options.autoNext) setTimeout(goToNextJob, 900);
+      pauseForManualStep(getDetailTitle(job), "Popup or screening question detected before apply.");
       return;
     }
 
@@ -764,9 +816,7 @@
     }
 
     if (detectBlockingPopup()) {
-      markCurrent("skipped", "Popup detected before apply.");
-      log(`Skipped popup job: ${title}`);
-      resumeQueue(900);
+      pauseForManualStep(title, "Popup or screening question detected before apply.");
       return;
     }
 
@@ -805,9 +855,7 @@
     }
 
     if (outcome === "popup") {
-      markCurrent("skipped", "Popup or screening question detected.");
-      log(`Skipped popup/screening: ${title}`);
-      resumeQueue(1200);
+      pauseForManualStep(title, "Popup or screening question detected after clicking Apply.");
       return;
     }
 
@@ -841,13 +889,17 @@
 
   function runApplyConfirmationFlow() {
     const state = readState();
-    if (!state.running || state.paused) return;
+    const current = currentJobFromState(state);
+    if (!current) return;
+    if (current.status === "applied") return;
 
     if (detectApplied() || isApplyConfirmationPage()) {
       markCurrent("applied", "Application appears submitted.");
-      const current = state.queue.find((job) => canonicalUrl(job.url) === canonicalUrl(state.currentUrl));
+      updateState((next) => {
+        next.manualWatchUrl = "";
+      });
       log(`Applied: ${current?.title || normalizeText(document.title) || "job"}`);
-      if (state.options.autoNext) setTimeout(goToNextJob, 1000);
+      if (state.options.autoNext) resumeQueue(1000);
     }
   }
 
@@ -1105,7 +1157,7 @@
     const pageType = isSearchResultsPage() ? "search page" : isJobDetailPage() ? "job detail" : "Naukri page";
     panel.querySelector("#cnaStatus").textContent = `${active} on ${pageType}`;
     panel.querySelector("#cnaCounts").textContent =
-      `Queue ${counts.total || 0} | Pending ${(counts.queued || 0) + (counts.opening || 0) + (counts.ready || 0)} | Applied ${counts.applied || 0} | Skipped ${counts.skipped || 0}`;
+      `Queue ${counts.total || 0} | Pending ${(counts.queued || 0) + (counts.opening || 0) + (counts.ready || 0)} | Applied ${counts.applied || 0} | Manual ${counts.manual || 0} | Skipped ${counts.skipped || 0}`;
 
     const currentJob = state.queue.find((job) => canonicalUrl(job.url) === canonicalUrl(state.currentUrl));
     const waitingForApply =
@@ -1130,16 +1182,23 @@
 
   function boot() {
     renderPanel();
+    const state = readState();
+    const current = currentJobFromState(state);
 
-    if (isJobDetailPage() && readState().running && !readState().paused) {
-      setTimeout(runJobDetailFlow, 1200);
+    if (current?.status === "manual") {
+      startManualApplyMonitor();
+      setTimeout(detectManualApplySuccess, 1000);
     }
 
-    if (isApplyConfirmationPage() && readState().running && !readState().paused) {
+    if (isApplyConfirmationPage()) {
       setTimeout(runApplyConfirmationFlow, 1200);
     }
 
-    if ((isSearchResultsPage() || isConfiguredSearchPage()) && readState().running && !readState().paused) {
+    if (isJobDetailPage() && state.running && !state.paused) {
+      setTimeout(runJobDetailFlow, 1200);
+    }
+
+    if ((isSearchResultsPage() || isConfiguredSearchPage()) && state.running && !state.paused) {
       setTimeout(runSearchPageFlow, 1200);
     }
   }
