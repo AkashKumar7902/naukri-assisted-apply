@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naukri Assisted Apply Queue
 // @namespace    codex.local
-// @version      0.3.0
+// @version      0.4.0
 // @description  Queue Naukri jobs from search results and assist with one-click reviewed applications.
 // @match        https://www.naukri.com/*
 // @include      https://*.naukri.com/*
@@ -20,11 +20,15 @@
 
   const STORAGE_KEY = "codex.naukriAssistedApply.v1";
   const DEFAULT_SEARCH_URL = "https://www.naukri.com/software-developer-jobs?k=software%20developer&nignbevent_src=jobsearchDeskGNB&experience=1&functionAreaIdGid=5&ctcFilter=15to25&glbl_qcrc=1026&glbl_qcrc=1027&glbl_qcrc=1028&jobAge=1";
+  const SCHEMA_VERSION = 2;
+  const LEGACY_DEFAULT_INCLUDE = "software, developer, backend, cloud, java, python, spring, aws, gcp";
+  const LEGACY_DEFAULT_EXCLUDE = "recruiter, sales, walk-in, system administrator, admin, customer support, bpo";
   const DEFAULT_OPTIONS = {
     searchUrl: DEFAULT_SEARCH_URL,
-    include: "software, developer, backend, cloud, java, python, spring, aws, gcp",
-    exclude: "recruiter, sales, walk-in, system administrator, admin, customer support, bpo",
-    maxJobs: 20,
+    include: "",
+    exclude: "",
+    maxJobs: 50,
+    maxSearchPages: 3,
     autoNext: true
   };
 
@@ -32,9 +36,11 @@
 
   function defaultState() {
     return {
+      schemaVersion: SCHEMA_VERSION,
       running: false,
       paused: false,
       currentUrl: "",
+      scannedSearchUrls: [],
       queue: [],
       options: Object.assign({}, DEFAULT_OPTIONS),
       logs: []
@@ -44,10 +50,21 @@
   function readState() {
     try {
       const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
+      const savedSchemaVersion = Number(parsed?.schemaVersion || 0);
       const state = Object.assign(defaultState(), parsed || {});
       state.options = Object.assign({}, DEFAULT_OPTIONS, state.options || {});
       state.queue = Array.isArray(state.queue) ? state.queue : [];
       state.logs = Array.isArray(state.logs) ? state.logs : [];
+      state.scannedSearchUrls = Array.isArray(state.scannedSearchUrls) ? state.scannedSearchUrls : [];
+
+      if (savedSchemaVersion < SCHEMA_VERSION) {
+        if (state.options.include === LEGACY_DEFAULT_INCLUDE) state.options.include = "";
+        if (state.options.exclude === LEGACY_DEFAULT_EXCLUDE) state.options.exclude = "";
+        if (Number(state.options.maxJobs) === 20) state.options.maxJobs = DEFAULT_OPTIONS.maxJobs;
+        state.scannedSearchUrls = [];
+      }
+
+      state.schemaVersion = SCHEMA_VERSION;
       return state;
     } catch (error) {
       return defaultState();
@@ -146,21 +163,53 @@
     const existing = new Set(state.queue.map((job) => canonicalUrl(job.url)));
     const cards = Array.from(document.querySelectorAll(".srp-jobtuple-wrapper, .jobTuple, article"));
     const found = [];
+    const stats = {
+      cards: cards.length,
+      added: 0,
+      alreadyQueued: 0,
+      noLink: 0,
+      emptyText: 0,
+      excluded: 0,
+      missingInclude: 0,
+      maxReached: false
+    };
+    const maxJobs = Math.max(1, Number(state.options.maxJobs || DEFAULT_OPTIONS.maxJobs));
+    const slots = Math.max(0, maxJobs - state.queue.length);
 
     for (const card of cards) {
+      if (found.length >= slots) {
+        stats.maxReached = true;
+        break;
+      }
+
       const link =
         card.querySelector('a.title[href*="job-listings"]') ||
         card.querySelector('a[href*="/job-listings-"]') ||
         card.querySelector('a[href*="job-listings"]');
-      if (!link || !link.href) continue;
+      if (!link || !link.href) {
+        stats.noLink += 1;
+        continue;
+      }
 
       const url = canonicalUrl(link.href);
-      if (existing.has(url)) continue;
+      if (existing.has(url)) {
+        stats.alreadyQueued += 1;
+        continue;
+      }
 
       const text = normalizeText(card.innerText);
-      if (!text) continue;
-      if (exclude.length && includesAny(text, exclude)) continue;
-      if (include.length && !includesAny(text, include)) continue;
+      if (!text) {
+        stats.emptyText += 1;
+        continue;
+      }
+      if (exclude.length && includesAny(text, exclude)) {
+        stats.excluded += 1;
+        continue;
+      }
+      if (include.length && !includesAny(text, include)) {
+        stats.missingInclude += 1;
+        continue;
+      }
 
       const company =
         normalizeText(card.querySelector(".comp-name")?.innerText) ||
@@ -177,14 +226,57 @@
       });
 
       existing.add(url);
-      if (found.length >= Number(state.options.maxJobs || DEFAULT_OPTIONS.maxJobs)) break;
     }
+
+    stats.added = found.length;
 
     updateState((next) => {
       next.queue.push(...found);
+      const current = canonicalUrl(location.href);
+      if (!next.scannedSearchUrls.includes(current)) next.scannedSearchUrls.push(current);
     });
 
-    log(found.length ? `Added ${found.length} job(s) to the queue.` : "No new matching jobs found on this page.");
+    const filtered = stats.excluded + stats.missingInclude;
+    const skipped = filtered + stats.alreadyQueued + stats.noLink + stats.emptyText;
+    const suffix = skipped ? ` (${stats.cards} cards, ${skipped} skipped${filtered ? `, ${filtered} by keywords` : ""}).` : ` (${stats.cards} cards).`;
+    log(found.length ? `Added ${found.length} job(s) to the queue${suffix}` : `No new jobs queued${suffix}`);
+    return stats;
+  }
+
+  function getNextResultsPageUrl() {
+    const links = Array.from(document.querySelectorAll("a[href]")).filter(isVisible);
+    const nextLink =
+      links.find((link) => normalizeText(link.innerText || link.textContent || link.getAttribute("aria-label")).toLowerCase() === "next") ||
+      links.find((link) => /\bnext\b/i.test(`${link.rel || ""} ${link.getAttribute("aria-label") || ""} ${link.className || ""}`));
+
+    if (!nextLink?.href) return "";
+
+    let nextHref = nextLink.href;
+    try {
+      const current = new URL(location.href);
+      const next = new URL(nextHref, location.href);
+      if (current.search && !next.search) next.search = current.search;
+      nextHref = next.href;
+    } catch (error) {
+      nextHref = nextLink.href;
+    }
+
+    const nextUrl = normalizeNaukriUrl(nextHref);
+    if (!nextUrl || canonicalUrl(nextUrl) === canonicalUrl(location.href)) return "";
+    return nextUrl;
+  }
+
+  function shouldScanNextResultsPage() {
+    const state = readState();
+    const maxJobs = Math.max(1, Number(state.options.maxJobs || DEFAULT_OPTIONS.maxJobs));
+    const maxSearchPages = Math.max(1, Number(state.options.maxSearchPages || DEFAULT_OPTIONS.maxSearchPages));
+    const nextUrl = getNextResultsPageUrl();
+    return Boolean(
+      nextUrl &&
+      state.queue.length < maxJobs &&
+      state.scannedSearchUrls.length < maxSearchPages &&
+      !state.scannedSearchUrls.includes(canonicalUrl(nextUrl))
+    ) ? nextUrl : "";
   }
 
   function nextQueuedJob(state) {
@@ -194,8 +286,12 @@
   function startQueue() {
     let state = readState();
     if (!state.queue.some((job) => !DONE_STATUSES.has(job.status)) && isSearchResultsPage()) {
-      scanJobsFromPage();
-      state = readState();
+      updateState((next) => {
+        next.running = true;
+        next.paused = false;
+      });
+      runSearchPageFlow();
+      return;
     }
 
     if (!state.queue.some((job) => !DONE_STATUSES.has(job.status)) && !isSearchResultsPage()) {
@@ -458,6 +554,13 @@
     }
 
     scanJobsFromPage();
+    const nextResultsPageUrl = shouldScanNextResultsPage();
+    if (nextResultsPageUrl) {
+      log("Scanning next results page before applying.");
+      location.href = nextResultsPageUrl;
+      return;
+    }
+
     if (nextQueuedJob(readState())) {
       setTimeout(goToNextJob, 700);
     } else {
@@ -820,9 +923,9 @@
           <summary>Advanced</summary>
           <label for="cnaSearchUrl">Search URL</label>
           <input id="cnaSearchUrl" type="url" />
-          <label for="cnaInclude">Include keywords</label>
+          <label for="cnaInclude">Include keywords (optional)</label>
           <input id="cnaInclude" type="text" />
-          <label for="cnaExclude">Exclude keywords</label>
+          <label for="cnaExclude">Exclude keywords (optional)</label>
           <input id="cnaExclude" type="text" />
           <label for="cnaMaxJobs">Max jobs</label>
           <input id="cnaMaxJobs" type="number" min="1" max="100" />

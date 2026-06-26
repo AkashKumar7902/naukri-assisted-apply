@@ -2,7 +2,7 @@
 
 I created `naukri_assisted_apply.user.js`, a Chrome userscript for Tampermonkey or Violentmonkey.
 
-It scans the visible Naukri results page, queues matching jobs, opens job pages one by one, and pauses with simple `Apply` / `Skip` buttons when a normal Naukri quick-apply button is ready. After each completed or skipped job it automatically moves to the next queued job. It skips jobs that are already applied, show screening popups/questions, or only offer `Apply on company site`. It stops for OTP/CAPTCHA or unclear outcomes.
+It scans Naukri result pages, queues job cards, opens job pages one by one, and pauses with simple `Apply` / `Skip` buttons when a normal Naukri quick-apply button is ready. After each completed or skipped job it automatically moves to the next queued job. It skips jobs that are already applied, show screening popups/questions, or only offer `Apply on company site`. It stops for OTP/CAPTCHA or unclear outcomes.
 
 ## Install
 
@@ -19,11 +19,12 @@ It scans the visible Naukri results page, queues matching jobs, opens job pages 
 3. Click `Start`.
 4. When it pauses on a normal quick-apply job, click `Apply` or `Skip`.
 
-Open `Advanced` only when you want to change the search URL, keywords, max jobs, or export the CSV log.
+Open `Advanced` only when you want to change the search URL, optional keywords, max jobs, or export the CSV log.
 
 ## Notes
 
-- The script only scans jobs currently visible in the page DOM.
+- The script queues every visible job card by default. Include/exclude keywords are optional filters.
+- The script scans up to 3 search-result pages, preserves the current URL filters while moving to the next page, and stops sooner if it reaches the max job limit.
 - Use Naukri filters first for location, salary, freshness, company type, and work mode.
 - You can replace the `Search URL` with any Naukri results URL.
 - It will not solve CAPTCHAs, OTPs, or answer recruiter questions automatically.
