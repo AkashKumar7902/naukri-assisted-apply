@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naukri Assisted Apply Queue
 // @namespace    codex.local
-// @version      0.4.0
+// @version      0.5.0
 // @description  Queue Naukri jobs from search results and assist with one-click reviewed applications.
 // @match        https://www.naukri.com/*
 // @include      https://*.naukri.com/*
@@ -20,15 +20,15 @@
 
   const STORAGE_KEY = "codex.naukriAssistedApply.v1";
   const DEFAULT_SEARCH_URL = "https://www.naukri.com/software-developer-jobs?k=software%20developer&nignbevent_src=jobsearchDeskGNB&experience=1&functionAreaIdGid=5&ctcFilter=15to25&glbl_qcrc=1026&glbl_qcrc=1027&glbl_qcrc=1028&jobAge=1";
-  const SCHEMA_VERSION = 2;
+  const SCHEMA_VERSION = 3;
   const LEGACY_DEFAULT_INCLUDE = "software, developer, backend, cloud, java, python, spring, aws, gcp";
   const LEGACY_DEFAULT_EXCLUDE = "recruiter, sales, walk-in, system administrator, admin, customer support, bpo";
   const DEFAULT_OPTIONS = {
     searchUrl: DEFAULT_SEARCH_URL,
     include: "",
     exclude: "",
-    maxJobs: 50,
-    maxSearchPages: 3,
+    maxJobs: 100,
+    maxSearchPages: 10,
     autoNext: true
   };
 
@@ -60,7 +60,8 @@
       if (savedSchemaVersion < SCHEMA_VERSION) {
         if (state.options.include === LEGACY_DEFAULT_INCLUDE) state.options.include = "";
         if (state.options.exclude === LEGACY_DEFAULT_EXCLUDE) state.options.exclude = "";
-        if (Number(state.options.maxJobs) === 20) state.options.maxJobs = DEFAULT_OPTIONS.maxJobs;
+        if ([20, 50].includes(Number(state.options.maxJobs))) state.options.maxJobs = DEFAULT_OPTIONS.maxJobs;
+        if (Number(state.options.maxSearchPages) === 3) state.options.maxSearchPages = DEFAULT_OPTIONS.maxSearchPages;
         state.scannedSearchUrls = [];
       }
 
@@ -156,12 +157,66 @@
     return Boolean(searchUrl && canonicalUrl(location.href) === canonicalUrl(searchUrl));
   }
 
-  function scanJobsFromPage() {
+  function queueHasCapacity(state) {
+    const maxJobs = Math.max(1, Number(state.options.maxJobs || DEFAULT_OPTIONS.maxJobs));
+    return state.queue.length < maxJobs;
+  }
+
+  function currentSearchPageWasScanned() {
+    const state = readState();
+    return state.scannedSearchUrls.includes(canonicalUrl(location.href));
+  }
+
+  function markCurrentSearchPageScanned() {
+    updateState((state) => {
+      const current = canonicalUrl(location.href);
+      if (!state.scannedSearchUrls.includes(current)) state.scannedSearchUrls.push(current);
+    });
+  }
+
+  function getResultCards() {
+    return Array.from(document.querySelectorAll(".srp-jobtuple-wrapper, .jobTuple, article"));
+  }
+
+  function getVisibleJobSignature() {
+    return getResultCards()
+      .map((card) => {
+        const link =
+          card.querySelector('a.title[href*="job-listings"]') ||
+          card.querySelector('a[href*="/job-listings-"]') ||
+          card.querySelector('a[href*="job-listings"]');
+        return link?.href ? canonicalUrl(link.href) : "";
+      })
+      .filter(Boolean)
+      .join("|");
+  }
+
+  function getScrollState() {
+    const doc = document.documentElement;
+    const body = document.body;
+    const top = window.scrollY || doc.scrollTop || body?.scrollTop || 0;
+    const height = Math.max(doc.scrollHeight || 0, body?.scrollHeight || 0);
+    const viewport = window.innerHeight || doc.clientHeight || 0;
+    return {
+      top,
+      height,
+      viewport,
+      nearBottom: top + viewport >= height - 80
+    };
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+
+  function scanJobsFromPage(options = {}) {
+    const shouldLog = options.logResult !== false;
+    const shouldMarkScanned = options.markScanned !== false;
     const state = readState();
     const include = splitKeywords(state.options.include);
     const exclude = splitKeywords(state.options.exclude);
     const existing = new Set(state.queue.map((job) => canonicalUrl(job.url)));
-    const cards = Array.from(document.querySelectorAll(".srp-jobtuple-wrapper, .jobTuple, article"));
+    const cards = getResultCards();
     const found = [];
     const stats = {
       cards: cards.length,
@@ -232,15 +287,69 @@
 
     updateState((next) => {
       next.queue.push(...found);
-      const current = canonicalUrl(location.href);
-      if (!next.scannedSearchUrls.includes(current)) next.scannedSearchUrls.push(current);
+      if (shouldMarkScanned) {
+        const current = canonicalUrl(location.href);
+        if (!next.scannedSearchUrls.includes(current)) next.scannedSearchUrls.push(current);
+      }
     });
 
-    const filtered = stats.excluded + stats.missingInclude;
-    const skipped = filtered + stats.alreadyQueued + stats.noLink + stats.emptyText;
-    const suffix = skipped ? ` (${stats.cards} cards, ${skipped} skipped${filtered ? `, ${filtered} by keywords` : ""}).` : ` (${stats.cards} cards).`;
-    log(found.length ? `Added ${found.length} job(s) to the queue${suffix}` : `No new jobs queued${suffix}`);
+    if (shouldLog) {
+      const filtered = stats.excluded + stats.missingInclude;
+      const skipped = filtered + stats.alreadyQueued + stats.noLink + stats.emptyText;
+      const suffix = skipped ? ` (${stats.cards} cards, ${skipped} skipped${filtered ? `, ${filtered} by keywords` : ""}).` : ` (${stats.cards} cards).`;
+      log(found.length ? `Added ${found.length} job(s) to the queue${suffix}` : `No new jobs queued${suffix}`);
+    }
+
     return stats;
+  }
+
+  async function scanCurrentResultsPageCompletely() {
+    const maxPasses = 14;
+    let totalAdded = 0;
+    let maxCardsSeen = 0;
+    let keywordSkipped = 0;
+    let stableBottomPasses = 0;
+
+    log("Scanning this results page, including scrolled jobs.");
+    window.scrollTo({ top: 0, behavior: "auto" });
+    await sleep(600);
+
+    for (let pass = 0; pass < maxPasses; pass += 1) {
+      if (!readState().running || readState().paused) return;
+      if (!queueHasCapacity(readState())) break;
+
+      const beforeSignature = getVisibleJobSignature();
+      const beforeScroll = getScrollState();
+      const stats = scanJobsFromPage({ logResult: false, markScanned: false });
+      totalAdded += stats.added;
+      maxCardsSeen = Math.max(maxCardsSeen, stats.cards);
+      keywordSkipped += stats.excluded + stats.missingInclude;
+
+      if (!queueHasCapacity(readState())) break;
+
+      const currentScroll = getScrollState();
+      if (currentScroll.nearBottom) {
+        await sleep(1200);
+        const afterWaitSignature = getVisibleJobSignature();
+        if (afterWaitSignature === beforeSignature) {
+          stableBottomPasses += 1;
+          if (stableBottomPasses >= 2) break;
+        } else {
+          stableBottomPasses = 0;
+        }
+      } else {
+        stableBottomPasses = 0;
+        window.scrollTo({
+          top: Math.min(currentScroll.height, beforeScroll.top + Math.max(650, Math.floor(currentScroll.viewport * 1.35))),
+          behavior: "smooth"
+        });
+        await sleep(1500);
+      }
+    }
+
+    markCurrentSearchPageScanned();
+    const keywordNote = keywordSkipped ? `, ${keywordSkipped} skipped by keywords` : "";
+    log(`Finished page scan: ${totalAdded} added from ${maxCardsSeen} visible card(s)${keywordNote}.`);
   }
 
   function getNextResultsPageUrl() {
@@ -537,11 +646,6 @@
   async function runSearchPageFlow() {
     if (!readState().running || readState().paused) return;
 
-    if (nextQueuedJob(readState())) {
-      goToNextJob();
-      return;
-    }
-
     await waitForCondition(() => document.querySelector(".srp-jobtuple-wrapper, .jobTuple"), 10000);
     if (!readState().running || readState().paused) return;
     if (!isSearchResultsPage()) {
@@ -553,7 +657,12 @@
       return;
     }
 
-    scanJobsFromPage();
+    if (!currentSearchPageWasScanned() && queueHasCapacity(readState())) {
+      await scanCurrentResultsPageCompletely();
+    }
+
+    if (!readState().running || readState().paused) return;
+
     const nextResultsPageUrl = shouldScanNextResultsPage();
     if (nextResultsPageUrl) {
       log("Scanning next results page before applying.");
@@ -929,6 +1038,8 @@
           <input id="cnaExclude" type="text" />
           <label for="cnaMaxJobs">Max jobs</label>
           <input id="cnaMaxJobs" type="number" min="1" max="100" />
+          <label for="cnaMaxSearchPages">Max result pages</label>
+          <input id="cnaMaxSearchPages" type="number" min="1" max="50" />
           <div class="cna-row">
             <button type="button" id="cnaExport">Export CSV</button>
           </div>
@@ -957,6 +1068,7 @@
     panel.querySelector("#cnaInclude").addEventListener("change", persistOptionsFromPanel);
     panel.querySelector("#cnaExclude").addEventListener("change", persistOptionsFromPanel);
     panel.querySelector("#cnaMaxJobs").addEventListener("change", persistOptionsFromPanel);
+    panel.querySelector("#cnaMaxSearchPages").addEventListener("change", persistOptionsFromPanel);
     return panel;
   }
 
@@ -967,6 +1079,7 @@
       state.options.include = panel.querySelector("#cnaInclude").value;
       state.options.exclude = panel.querySelector("#cnaExclude").value;
       state.options.maxJobs = Math.max(1, Number(panel.querySelector("#cnaMaxJobs").value || DEFAULT_OPTIONS.maxJobs));
+      state.options.maxSearchPages = Math.max(1, Number(panel.querySelector("#cnaMaxSearchPages").value || DEFAULT_OPTIONS.maxSearchPages));
     });
   }
 
@@ -977,6 +1090,7 @@
     panel.querySelector("#cnaInclude").value = state.options.include;
     panel.querySelector("#cnaExclude").value = state.options.exclude;
     panel.querySelector("#cnaMaxJobs").value = state.options.maxJobs;
+    panel.querySelector("#cnaMaxSearchPages").value = state.options.maxSearchPages;
 
     const counts = state.queue.reduce(
       (memo, job) => {
