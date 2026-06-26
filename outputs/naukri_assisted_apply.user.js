@@ -1,14 +1,19 @@
 // ==UserScript==
 // @name         Naukri Assisted Apply Queue
 // @namespace    codex.local
-// @version      0.1.2
+// @version      0.1.3
 // @description  Queue Naukri jobs from search results and assist with user-confirmed applications.
 // @match        https://www.naukri.com/*
+// @include      https://*.naukri.com/*
+// @run-at       document-idle
+// @noframes
 // @grant        none
 // ==/UserScript==
 
 (function () {
   "use strict";
+
+  console.info("[Naukri Assist] userscript loaded", location.href);
 
   if (window.__codexNaukriAssistLoaded) return;
   window.__codexNaukriAssistLoaded = true;
