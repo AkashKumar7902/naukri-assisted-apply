@@ -2,7 +2,7 @@
 
 I created `naukri_assisted_apply.user.js`, a Chrome userscript for Tampermonkey or Violentmonkey.
 
-It does not blindly spam applications. It scans the visible Naukri results page, queues matching jobs, opens job pages one by one, and asks for your confirmation before clicking `Apply` for each job. It stops when Naukri asks screening questions, shows OTP/CAPTCHA, redirects outside Naukri, or when the outcome cannot be confirmed.
+It does not blindly spam applications. It scans the visible Naukri results page, queues matching jobs, opens job pages one by one, and asks for your confirmation before clicking `Apply` for each job. It skips jobs that show screening questions, and stops when Naukri shows OTP/CAPTCHA, redirects outside Naukri, or when the outcome cannot be confirmed.
 
 ## Install
 
@@ -28,5 +28,6 @@ It does not blindly spam applications. It scans the visible Naukri results page,
 - Use Naukri filters first for location, salary, freshness, company type, and work mode.
 - You can replace the `Search URL` with any Naukri results URL.
 - It will not solve CAPTCHAs, OTPs, or answer recruiter questions automatically.
+- Jobs with screening questions are marked `skipped` and the queue moves on.
 - `Export CSV` downloads the current queue and status log.
 - `Clear` removes the local queue from your browser storage.

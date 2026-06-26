@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Naukri Assisted Apply Queue
 // @namespace    codex.local
-// @version      0.1.1
+// @version      0.1.2
 // @description  Queue Naukri jobs from search results and assist with user-confirmed applications.
 // @match        https://www.naukri.com/*
 // @grant        none
@@ -464,7 +464,7 @@
       `Apply to "${title}"${company}?`,
       "",
       "This will send your Naukri profile/resume to the employer.",
-      "The helper will stop if Naukri asks questions, shows verification, or redirects outside Naukri."
+      "The helper will skip jobs with screening questions and stop for verification or external redirects."
     ].join("\n");
 
     if (!window.confirm(message)) {
@@ -486,12 +486,9 @@
     }
 
     if (outcome === "manual") {
-      markCurrent("manual", "Questionnaire or extra inputs detected.");
-      updateState((next) => {
-        next.running = false;
-        next.paused = true;
-      });
-      log("Stopped: manual questions or extra inputs detected.");
+      markCurrent("skipped", "Screening question or extra inputs detected.");
+      log(`Skipped screening questions: ${title}`);
+      if (readState().options.autoNext) setTimeout(goToNextJob, 1200);
       return;
     }
 
